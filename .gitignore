@@ -1,0 +1,11 @@
+build/
+.venv/
+third_party/SuiteSparse/
+third_party/suitesparse-*/
+data/*.mat
+data/*.tar.gz
+*.mexmaci64
+*.mexmaca64
+*.mexa64
+*.mexw64
+*.o
