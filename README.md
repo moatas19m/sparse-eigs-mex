@@ -4,29 +4,48 @@
 eigenvectors of a sparse square matrix, aiming for **≥ 5× faster than MATLAB's
 `eigs`** by exploiting symmetry, positive-definiteness, and nonzero structure.
 
-**Status: design + environment set up. Solver not yet written.**
+**Status: solver written, compiled and validated. MEX gateway written, not yet run
+against MATLAB.**
 
-Read [`docs/REQUIREMENTS.md`](docs/REQUIREMENTS.md) first — it contains the
-feasibility evidence, the design, and the honest list of risks.
+Read [`docs/REQUIREMENTS.md`](docs/REQUIREMENTS.md) for the design, or the
+[published report](https://moatas19m.github.io/sparse-eigs-mex/) for the results.
 
-## Why this can be faster than `eigs`
+## Result
+
+Measured end to end against the cost `eigs` pays for the same work (UMFPACK LU plus
+the same number of triangular solves), on 3-D Laplacians, k = 6, Apple M1:
+
+| n | speedup |
+|---:|---:|
+| 8,000 | 3.60× |
+| 15,625 | 3.72× |
+| 32,768 | 3.90× |
+| 64,000 | **5.19×** (7-trial median 5.64×) |
+| 97,336 | **7.15×** |
+
+**The 5× requirement is met from n ≈ 58,000 upward, and missed below it.** The
+shortfall at small n is structural: UMFPACK's LU produces less fill on smaller
+problems, so the advantage of exploiting symmetry shrinks with it. Changing the
+fill-reducing ordering does not close it.
+
+## Why it is faster where it is
 
 For the smallest-magnitude case `eigs` shift-inverts using MATLAB's `lu`, i.e.
 **UMFPACK unsymmetric LU — even when the matrix is symmetric positive definite** —
-with AMD ordering, and it re-enters the MATLAB interpreter once per matrix-vector
-product (on R2017a and older, via ARPACK reverse communication).
+with AMD ordering, and on R2017a it re-enters the MATLAB interpreter once per
+matrix-vector product via ARPACK's reverse communication.
 
-I instead use **CHOLMOD supernodal Cholesky** with **METIS nested-dissection**
-ordering and keep the entire Lanczos loop in C. Measured on a 3-D Laplacian,
-n = 64,000 (Apple M1, Accelerate BLAS):
+This uses **CHOLMOD supernodal Cholesky** with **METIS nested dissection** and keeps
+the whole Lanczos loop in C. Method: thick-restart Lanczos with full
+reorthogonalisation over a pluggable operator, so `'sm'` and `'lm'` share one path.
 
-| | `eigs`' path | mine | ratio |
-|---|---|---|---|
-| factorization | 2.964 s | 0.781 s | **3.8×** |
-| one solve | 0.1272 s | 0.0142 s | **9.0×** |
+## Validation
 
-Shift-invert does one factorization and 40–300 solves, so the end-to-end model
-gives **6.0×–8.2×**, widening with problem size and difficulty.
+`make test` — 39 checks, 0 failures, under both clang and gcc. Correctness is
+checked against the **closed-form** Laplacian spectra rather than another numerical
+code: eigenvalues agree to 1e-12, the singular PSD case returns λ₀ = -4.3e-19 with a
+constant null vector, and all three copies of a multiplicity-3 eigenvalue are found
+with mutually orthogonal eigenvectors.
 
 ## Layout
 

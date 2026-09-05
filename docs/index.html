@@ -105,37 +105,37 @@
 <div class="wrap">
 
 <header>
-  <div class="eyebrow">Feasibility evaluation · MEX-C sparse eigensolver</div>
+  <div class="eyebrow">Measured results · MEX-C sparse eigensolver</div>
   <h1>Can I beat <span style="font-family:var(--mono);font-size:.78em">eigs</span> by 5×?</h1>
-  <p class="lede col">Short answer: yes, for matrices of any real size — and the margin widens as the problem gets harder. Here is the measured evidence, and the three places the claim is genuinely at risk.</p>
+  <p class="lede col">The solver is built and measured. The answer is a qualified yes: <strong>5.6× at n&nbsp;=&nbsp;64,000 and 7.2× at n&nbsp;=&nbsp;97,000, but only 3.6–3.9× below n&nbsp;≈&nbsp;58,000</strong>. My earlier estimate put that crossover ten times lower. Here is what was built, what it measures, and where it misses.</p>
   <div class="meta">
     <span>k smallest / largest magnitude eigenpairs</span>
     <span>Sparse SPD, possibly semi-definite</span>
     <span>MATLAB R2017a or older</span>
-    <span>Measured on Apple M1 · SuiteSparse 7.14.0</span>
+    <span>Apple M1 · SuiteSparse 7.14.0 · 39/39 validation checks</span>
   </div>
 </header>
 
 <div class="verdicts">
   <div class="v ok">
-    <div class="k">Factorization</div>
-    <div class="val">3.8×</div>
-    <div class="sub">CHOLMOD supernodal LLᵀ vs the UMFPACK LU <span class="n">eigs</span> uses. Measured, n&nbsp;=&nbsp;64,000.</div>
+    <div class="k">n = 97,336</div>
+    <div class="val">7.15×</div>
+    <div class="sub">Measured end to end, k&nbsp;=&nbsp;6. The advantage grows with problem size.</div>
   </div>
   <div class="v ok">
-    <div class="k">Per solve</div>
-    <div class="val">9.0×</div>
-    <div class="sub">The cost that repeats 40–300 times per call. This is where the win compounds.</div>
-  </div>
-  <div class="v ok">
-    <div class="k">End to end (modelled)</div>
-    <div class="val">6.0–8.2×</div>
-    <div class="sub">Clears the 5× bar above ~17 iterations, rising toward an 9.0× ceiling.</div>
+    <div class="k">n = 64,000</div>
+    <div class="val">5.64×</div>
+    <div class="sub">Median of 7 warm trials; worst trial 5.41×, best 6.05×. Clears the bar.</div>
   </div>
   <div class="v risk">
-    <div class="k">At risk</div>
-    <div class="val">n &lt; 5k</div>
-    <div class="sub">Small matrices give only ~3.5× from factorization alone. Detailed below.</div>
+    <div class="k">n &lt; 58,000</div>
+    <div class="val">3.6–3.9×</div>
+    <div class="sub">Misses the bar, and tuning does not fix it. The cause is structural.</div>
+  </div>
+  <div class="v ok">
+    <div class="k">Validation</div>
+    <div class="val">39 / 39</div>
+    <div class="sub">Against analytically known spectra, under both clang and gcc.</div>
   </div>
 </div>
 
@@ -181,67 +181,73 @@
 
 <section>
   <div class="col">
-    <div class="eyebrow">The argument</div>
-    <h2>Why the advantage grows with difficulty</h2>
-    <p>Shift-invert pays for one factorization and then one triangular solve per Lanczos iteration. Because my per-solve advantage (9.0×) is larger than my factorization advantage (3.8×), the end-to-end speedup <em>rises</em> with iteration count. Hard problems — clustered spectra, larger <code>k</code>, tighter tolerances — favour mine.</p>
+    <div class="eyebrow">The result</div>
+    <h2>Measured speedup, and where it crosses the bar</h2>
+    <p>The chart below is measurement, not a model. Each point is the median of three warm runs of the finished solver against the cost <code>eigs</code> pays for the same work, on 3-D Laplacians of increasing size with k&nbsp;=&nbsp;6.</p>
+    <p>To keep the comparison fair, <code>eigs</code> is charged the <em>same number of operator applications</em> that my solver actually used. That isolates the claim being made — that the factorization and the solves are faster — and deliberately gives my code no credit for converging in fewer iterations, which would be a separate claim needing separate evidence.</p>
   </div>
   <div class="fig">
-    <svg viewBox="0 0 900 380" role="img" aria-label="Modelled speedup against eigs rising from 4.6 times at 10 solves to 8.2 times at 300 solves, crossing the 5 times bar at about 17 solves.">
+    <svg viewBox="0 0 900 390" role="img" aria-label="Measured speedup rising from 3.6 times at n=8,000 to 7.15 times at n=97,336, crossing the 5 times requirement at about n=58,000.">
       <defs>
         <linearGradient id="fillg" x1="0" y1="0" x2="0" y2="1">
           <stop offset="0%" stop-color="var(--accent)" stop-opacity=".20"/>
           <stop offset="100%" stop-color="var(--accent)" stop-opacity="0"/>
         </linearGradient>
       </defs>
-      <!-- gridlines + y labels: speedup 3..9 -->
       <g font-family="JetBrains Mono, monospace" font-size="12" fill="var(--muted)">
-        <line x1="86" y1="300" x2="862" y2="300" stroke="var(--rule)" stroke-width="1"/>
-        <text x="74" y="304" text-anchor="end">3×</text>
-        <line x1="86" y1="252" x2="862" y2="252" stroke="var(--rule)" stroke-width="1"/>
-        <text x="74" y="256" text-anchor="end">4×</text>
-        <line x1="86" y1="204" x2="862" y2="204" stroke="var(--warn)" stroke-width="1.5" stroke-dasharray="5 4"/>
-        <text x="74" y="208" text-anchor="end" fill="var(--warn)" font-weight="600">5×</text>
-        <line x1="86" y1="156" x2="862" y2="156" stroke="var(--rule)" stroke-width="1"/>
-        <text x="74" y="160" text-anchor="end">6×</text>
-        <line x1="86" y1="108" x2="862" y2="108" stroke="var(--rule)" stroke-width="1"/>
-        <text x="74" y="112" text-anchor="end">7×</text>
-        <line x1="86" y1="60" x2="862" y2="60" stroke="var(--rule)" stroke-width="1"/>
-        <text x="74" y="64" text-anchor="end">8×</text>
-        <line x1="86" y1="12" x2="862" y2="12" stroke="var(--rule)" stroke-width="1"/>
-        <text x="74" y="16" text-anchor="end">9×</text>
+        <line x1="110" y1="320" x2="875" y2="320" stroke="var(--rule)"/><text x="98" y="324" text-anchor="end">3×</text>
+        <line x1="110" y1="264" x2="875" y2="264" stroke="var(--rule)"/><text x="98" y="268" text-anchor="end">4×</text>
+        <line x1="110" y1="208" x2="875" y2="208" stroke="var(--warn)" stroke-width="1.5" stroke-dasharray="5 4"/>
+        <text x="98" y="212" text-anchor="end" fill="var(--warn)" font-weight="600">5×</text>
+        <line x1="110" y1="152" x2="875" y2="152" stroke="var(--rule)"/><text x="98" y="156" text-anchor="end">6×</text>
+        <line x1="110" y1="96"  x2="875" y2="96"  stroke="var(--rule)"/><text x="98" y="100" text-anchor="end">7×</text>
+        <line x1="110" y1="40"  x2="875" y2="40"  stroke="var(--rule)"/><text x="98" y="44"  text-anchor="end">8×</text>
       </g>
-      <!-- ceiling label -->
-      <text x="862" y="30" text-anchor="end" font-family="JetBrains Mono, monospace" font-size="11.5" fill="var(--muted)">ceiling 9.0× — the per-solve ratio</text>
-      <!-- curve: x = log10 scale from 10 to 300 solves, y = speedup -->
-      <!-- pts: (10,4.59)(20,5.17)(40,5.97)(60,6.49)(100,7.13)(200,7.84)(300,8.16) -->
-      <path d="M126,224 L276,196 L426,157 L514,132 L624,102 L774,68 L862,52 L862,348 L126,348 Z" fill="url(#fillg)"/>
-      <path d="M126,224 L276,196 L426,157 L514,132 L624,102 L774,68 L862,52"
-            fill="none" stroke="var(--accent)" stroke-width="2.5" stroke-linejoin="round"/>
+      <text x="875" y="200" text-anchor="end" font-family="JetBrains Mono, monospace" font-size="11.5" fill="var(--warn)">the requirement</text>
+      <path d="M110,286 L311,280 L533,270 L734,197 L860,88 L860,320 L110,320 Z" fill="url(#fillg)"/>
+      <path d="M110,286 L311,280 L533,270 L734,197 L860,88" fill="none"
+            stroke="var(--accent)" stroke-width="2.5" stroke-linejoin="round"/>
       <g fill="var(--accent)">
-        <circle cx="126" cy="224" r="4"/><circle cx="276" cy="196" r="4"/>
-        <circle cx="426" cy="157" r="4"/><circle cx="624" cy="102" r="4"/>
-        <circle cx="774" cy="68" r="4"/>
+        <circle cx="110" cy="286" r="4.5"/><circle cx="311" cy="280" r="4.5"/>
+        <circle cx="533" cy="270" r="4.5"/><circle cx="734" cy="197" r="4.5"/>
+        <circle cx="860" cy="88" r="4.5"/>
       </g>
-      <!-- crossing marker at ~17 solves -->
-      <circle cx="241" cy="204" r="5.5" fill="none" stroke="var(--warn)" stroke-width="2"/>
-      <text x="251" y="234" font-family="JetBrains Mono, monospace" font-size="11.5" fill="var(--warn)" font-weight="600">crosses 5× at ~17 solves</text>
-      <!-- value labels -->
-      <g font-family="JetBrains Mono, monospace" font-size="12" fill="var(--ink)" font-weight="600">
-        <text x="126" y="214" text-anchor="middle">4.6×</text>
-        <text x="426" y="147" text-anchor="middle">6.0×</text>
-        <text x="774" y="58" text-anchor="middle">7.8×</text>
+      <circle cx="704" cy="208" r="6" fill="none" stroke="var(--warn)" stroke-width="2"/>
+      <text x="694" y="240" text-anchor="end" font-family="JetBrains Mono, monospace"
+            font-size="11.5" fill="var(--warn)" font-weight="600">crosses 5× at n ≈ 58,000</text>
+      <g font-family="JetBrains Mono, monospace" font-size="12.5" fill="var(--ink)" font-weight="600">
+        <text x="120" y="277" text-anchor="start">3.60×</text>
+        <text x="311" y="271" text-anchor="middle">3.72×</text>
+        <text x="533" y="261" text-anchor="middle">3.90×</text>
+        <text x="734" y="188" text-anchor="middle">5.19×</text>
+        <text x="860" y="79" text-anchor="end">7.15×</text>
       </g>
-      <!-- x axis -->
-      <line x1="86" y1="348" x2="862" y2="348" stroke="var(--ink)" stroke-width="1.5"/>
+      <line x1="110" y1="320" x2="875" y2="320" stroke="var(--ink)" stroke-width="1.5"/>
       <g font-family="JetBrains Mono, monospace" font-size="12" fill="var(--muted)" text-anchor="middle">
-        <text x="126" y="368">10</text><text x="276" y="368">20</text>
-        <text x="426" y="368">40</text><text x="624" y="368">100</text>
-        <text x="774" y="368">200</text><text x="862" y="368">300</text>
+        <text x="110" y="342">8,000</text><text x="311" y="342">15,625</text>
+        <text x="533" y="342">32,768</text><text x="734" y="342">64,000</text>
+        <text x="860" y="342">97,336</text>
+        <text x="492" y="366" fill="var(--muted)">matrix dimension n (log scale)</text>
       </g>
-      <text x="474" y="368" font-family="JetBrains Mono, monospace" font-size="11" fill="var(--muted)" text-anchor="middle" opacity="0">.</text>
     </svg>
-    <p class="cap">Modelled end-to-end speedup versus number of triangular solves, from the measured factorization and solve times above (n = 64,000, k = 6). Horizontal axis is logarithmic in solve count. The 5× requirement is met from roughly 17 iterations onward; typical shift-invert Lanczos runs use 40–300.</p>
+    <p class="cap">Measured end-to-end speedup versus matrix dimension, median of three warm runs each, k = 6. A separate seven-trial measurement at n = 64,000 gave a median of 5.64× (worst 5.41×, best 6.05×). Apple M1, Accelerate BLAS, SuiteSparse 7.14.0.</p>
   </div>
+  <div class="col">
+    <div class="note risk">
+      <h3>My earlier estimate was wrong by an order of magnitude in n</h3>
+      <p>Before writing the solver I modelled the speedup from component timings and predicted <strong>6.0–8.2×</strong>, with the risk zone below n&nbsp;≈&nbsp;5,000. The finished solver gives <strong>5.6×</strong> at n&nbsp;=&nbsp;64,000, and the true crossover is near <strong>n&nbsp;≈&nbsp;58,000</strong> — about ten times higher than I claimed. The model priced the triangular solves but not the iteration around them: orthogonalisation, residual checks and restart cost about 13% of the iteration phase, and the model gave the factorization advantage more weight than it earns end to end.</p>
+    </div>
+    <p>Where the time actually goes at n&nbsp;=&nbsp;64,000: analysis 0.31&nbsp;s, factorization 0.19&nbsp;s, iteration 1.00&nbsp;s. Within that iteration phase the solves are 86% of the cost and the surrounding algorithm is 13% — so the implementation is not leaving much on the table. 74 operator applications, 6 restarts, maximum residual 1.8&nbsp;×&nbsp;10⁻¹⁴.</p>
+  </div>
+</section>
+
+<section class="col">
+  <div class="eyebrow">The shortfall</div>
+  <h2>Why small matrices miss, and why tuning will not save them</h2>
+  <p>Below n&nbsp;≈&nbsp;58,000 the solver lands at 3.6–3.9×. I checked whether this was an artifact of my own choices before concluding it was structural, and it is not an artifact.</p>
+  <p>The obvious suspect was the fill-reducing ordering. Comparing AMD against METIS end to end: at n&nbsp;=&nbsp;8,000 AMD wins (0.055&nbsp;s vs 0.092&nbsp;s) because METIS's analysis phase dominates everything else; by n&nbsp;=&nbsp;15,625 METIS wins (0.199&nbsp;s vs 0.231&nbsp;s); at n&nbsp;=&nbsp;64,000 it wins again (1.50&nbsp;s vs 1.62&nbsp;s). The crossover sits between 8,000 and 15,625, so I moved the threshold from 20,000 to 12,000 — worth about 14% at n&nbsp;=&nbsp;15,625, and nowhere near enough to turn 3.7× into 5×.</p>
+  <p>The real cause is structural: <strong>on smaller problems UMFPACK's LU simply produces less fill</strong>, so the advantage of exploiting symmetry and using nested dissection shrinks with it. There is no tuning knob for that. Closing the gap at small n would need a different attack — eliminating <code>eigs</code>' per-iteration interpreter overhead, which I cannot measure without MATLAB, or the dense LAPACK path, which only reaches so far up.</p>
+  <p>One caveat that runs in the other direction, stated without claiming credit for it: this comparison charges <code>eigs</code> <em>nothing</em> for ARPACK's reverse communication, which on R2017a re-enters the MATLAB interpreter once per matrix-vector product. That overhead is proportionally largest exactly where I am weakest. It may narrow the gap at small n. I have not measured it and am not counting it.</p>
 </section>
 
 <section>
@@ -266,7 +272,8 @@ umfpack_dl_numeric   →  status = <b>UMFPACK_OK</b>,           rcond   = <b>9.0
     <h3 style="margin-top:8px">How I handle it</h3>
     <p>Estimate ‖A‖₁, then factorize <code>A + δI</code> with δ escalating geometrically from ‖A‖₁·√ε. The probe confirms this succeeds at every δ tested, down to <span class="n">1.2 × 10⁻¹¹</span>. Run Lanczos on <code>(A+δI)⁻¹</code> — then <strong>discard the shifted eigenvalue estimates entirely</strong> and recompute each λ as a Rayleigh quotient <code>vᵀAv / vᵀv</code> against the <em>original</em> A, reporting residuals ‖Av − λv‖ against the original A as well.</p>
     <p>The consequence is the point: <strong>δ affects only the rate of convergence, never the accuracy of the answer.</strong></p>
-    <p>One further trap. A semi-definite matrix has λ = 0 with multiplicity equal to its nullity, and plain Lanczos is notorious for missing repeated eigenvalues. I therefore use <strong>block Lanczos</strong> with full reorthogonalisation and explicit locking. That is a correctness requirement here, not an optimisation — and the block structure happens to convert the triangular solves from BLAS-2 to BLAS-3, so it pays for itself in speed too.</p>
+    <p>One further trap. A semi-definite matrix has λ = 0 with multiplicity equal to its nullity, and plain Lanczos is notorious for missing repeated eigenvalues, because a Krylov space built from one starting vector contains only a single direction from each eigenspace. The implemented fix is full reorthogonalisation plus <strong>random re-injection on breakdown</strong>: when the recurrence exhausts an invariant subspace, a fresh vector orthogonal to everything already found is injected, which brings the remaining copies into reach.</p>
+    <p><strong>It works.</strong> On the singular Neumann Laplacian the solver returns λ₀ = −4.3&nbsp;×&nbsp;10⁻¹⁹ with a null vector constant to 1.2&nbsp;×&nbsp;10⁻¹⁶; on the Dirichlet Laplacian it recovers all three copies of a genuine multiplicity-3 eigenvalue with eigenvectors mutually orthogonal to 3&nbsp;×&nbsp;10⁻¹⁶.</p>
   </div>
 </section>
 
@@ -295,33 +302,70 @@ umfpack_dl_numeric   →  status = <b>UMFPACK_OK</b>,           rcond   = <b>9.0
   </div>
 </section>
 
+<section>
+  <div class="col">
+    <div class="eyebrow">What exists now</div>
+    <h2>The solver, and how it is validated</h2>
+    <p>The numerical core is plain C with no MATLAB dependency — it takes raw CSC arrays and returns eigenpairs. That is deliberate: it means the mathematics can be compiled, run and validated on a machine with no MATLAB on it, and the MEX file is reduced to a thin gateway. It builds clean under both Apple clang 17 and GNU gcc 16.</p>
+    <p>The method is <strong>thick-restart Lanczos with full reorthogonalisation</strong> over a pluggable operator, so shift-invert (<code>'sm'</code>) and direct (<code>'lm'</code>) share one code path. Because reorthogonalisation is full, the projected-matrix columns it computes <em>are</em> the thick-restart arrow structure — so the restart costs no extra bookkeeping at all.</p>
+  </div>
+  <div class="scroll">
+    <table>
+      <caption>Validation — 39 checks, 0 failures, under clang and gcc</caption>
+      <thead><tr><th>Test</th><th style="text-align:left">What it proves</th><th style="text-align:left">Result</th></tr></thead>
+      <tbody>
+        <tr><td>Dirichlet Laplacian</td><td style="text-align:left">Eigenvalues against the <em>closed-form</em> spectrum, not another numerical code</td><td style="text-align:left">agrees to 1e−12; residual 5.3e−15</td></tr>
+        <tr><td>Neumann Laplacian</td><td style="text-align:left">Singular PSD: finds the null space</td><td style="text-align:left">λ₀ = −4.3e−19; null vector constant to 1.2e−16</td></tr>
+        <tr><td>Multiplicity</td><td style="text-align:left">A genuine triple eigenvalue — plain Lanczos returns only one copy</td><td style="text-align:left">all 3 found; mutually orthogonal to 3e−16</td></tr>
+        <tr><td>Largest magnitude</td><td style="text-align:left">The no-factorization path</td><td style="text-align:left">matches analytic spectrum</td></tr>
+        <tr><td>Diagonal matrix</td><td style="text-align:left">Structure detection short-circuits</td><td style="text-align:left">detected; 5×10⁻⁵ s for n = 5,000</td></tr>
+        <tr><td>Indefinite matrix</td><td style="text-align:left">Falls back to LU rather than answering the wrong question</td><td style="text-align:left">correct path; converged in 75 solves</td></tr>
+        <tr><td>Pathological</td><td style="text-align:left">σ exactly on an eigenvalue: degrades honestly</td><td style="text-align:left">values right, reports PARTIAL, no crash</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="col">
+    <p>Using Laplacians is not incidental. Their spectra are known in closed form, so correctness is checked against <em>analysis</em> rather than against another numerical code that could be wrong in the same way — and the Dirichlet case happens to contain a multiplicity-3 cluster at k = 6, so the repeated-eigenvalue path is exercised by the ordinary test rather than a contrived one.</p>
+  </div>
+</section>
+
 <section class="col">
-  <div class="eyebrow">A decision made from data, not taste</div>
-  <h2>Which ordering, and when</h2>
-  <p>METIS nested dissection is not universally better. At n = 64,000 it costs about 0.45 s more in symbolic analysis than AMD, but saves 0.22 s per factorization and 7.4 ms per solve. Break-even is around <strong>30 solves</strong>. Since shift-invert Lanczos performs 40–300, METIS wins for large problems — but at n = 4,096 its analysis cost alone dominates the entire solve.</p>
-  <p>Hence the rule: <strong>AMD below roughly n = 20,000, METIS above.</strong> The threshold is derived from the measurements, and will be re-tuned on the target matrices once they are available.</p>
+  <div class="eyebrow">Two bugs the measurements caught</div>
+  <h2>Where writing the code changed the design</h2>
+  <div class="note risk">
+    <h3>1 · A "safely tiny" shift cost 75× in solves</h3>
+    <p>For a singular matrix I first set the regularising shift to δ = 10⁻¹⁰‖A‖, on the reasoning that smaller is safer. It is not. That makes θ₀/θ₁ ≈ 3×10⁷, which pollutes the small Ritz values enough that convergence never certifies: <strong>3,020 solves and a partial-convergence flag</strong>, versus <strong>40 solves</strong> at δ = 10⁻⁶‖A‖ for identical accuracy. The good region turned out to be broad — 10⁻⁶ to 10⁻³ at both n = 4,096 and n = 13,824 — so the default is now its conservative end. My test had not asserted the convergence flag, so the bad default passed silently; it does now.</p>
+  </div>
+  <div class="note risk">
+    <h3>2 · Raising that default made the solver answer the wrong question</h3>
+    <p>With a larger starting δ, the escalation loop for a genuinely indefinite matrix could reach δ ≈ 18 and <em>succeed</em> at Cholesky — but shift-invert at δ = 18 converges to the eigenvalues nearest −18, not those nearest zero. It returned a confident, wrong answer. The fix is a hard cap: for a positive semi-definite matrix the very first shift always works, so needing a large one is proof the matrix is indefinite and must go to LU instead. The escalation now stops at 10⁻³‖A‖.</p>
+  </div>
 </section>
 
 <section class="col">
   <div class="eyebrow">Honest limits</div>
-  <h2>Three places this could fall short</h2>
+  <h2>What this does not do</h2>
   <div class="note risk">
-    <h3>1 · Small matrices</h3>
-    <p>At n = 4,096 the measured factorization-plus-solve advantage is only about <strong>3.5×</strong>. There I must clear the bar through the dense LAPACK fallback and by eliminating <code>eigs</code>' per-iteration interpreter overhead — not through the factorization. On a specific small matrix I may land at 3–4× rather than 5×.</p>
+    <h3>1 · It misses the requirement below n ≈ 58,000</h3>
+    <p>3.6–3.9× on the sizes I tested below the crossover. This is the headline caveat and it is structural, not a tuning failure. If his matrices are in the tens of thousands rather than the hundreds of thousands, the 5× requirement is <strong>not met</strong> as things stand.</p>
   </div>
   <div class="note risk">
-    <h3>2 · Problems that are already fast</h3>
-    <p>If the matrices in real use are solved in under a tenth of a second, a 5× speedup is academic. Worth confirming the sizes actually in play before investing further — this is the question whose answer most affects whether the work is worth doing.</p>
+    <h3>2 · Still no end-to-end <code>eigs</code> comparison</h3>
+    <p>Every number here compares against the cost <code>eigs</code> demonstrably pays — UMFPACK LU plus the same count of triangular solves — measured in the same process. It is not <code>eigs</code> itself, because there is no MATLAB on this machine. The MEX gateway compiles clean against both API eras but has never been run.</p>
   </div>
   <div class="note risk">
-    <h3>3 · These are component measurements plus a model</h3>
-    <p>They are <strong>not</strong> an end-to-end <code>eigs</code> benchmark, because there is no MATLAB installation on this machine. The factorization and solve timings are real and directly measured; the 6.0–8.2× figure is those timings composed through the shift-invert iteration count. The real benchmark is the next step, and it needs a machine with MATLAB.</p>
+    <h3>3 · One matrix family</h3>
+    <p>All measurements are on 3-D Laplacians. They are a fair, well-understood proxy with realistic fill, and their known spectra are what make the validation rigorous — but they are one family. Irregular FEM meshes, circuit matrices and graph Laplacians will each behave differently, and some will favour this approach more than the Laplacian does.</p>
+  </div>
+  <div class="note">
+    <h3>4 · Not yet implemented</h3>
+    <p>Connected-component splitting and the banded path are designed and documented but not written; the structure pass currently detects the diagonal case and dispatches to dense LAPACK for small n. Complex Hermitian input is rejected with a clear error rather than silently mishandled.</p>
   </div>
 </section>
 
 <section class="col">
-  <div class="eyebrow">Before any code is written</div>
-  <h2>What is still needed</h2>
+  <div class="eyebrow">Open questions</div>
+  <h2>What I still need to close this out</h2>
   <ul>
     <li><strong>Operating system and processor architecture</strong>, plus the exact MATLAB version. This is blocking. R2017a is Intel-only and expects Xcode ≈ 8; this machine is Apple Silicon on macOS 26 with clang 17, so the MEX file almost certainly has to be compiled on the target machine, against a statically linked SuiteSparse built for that architecture.</li>
     <li><strong>Typical n and nnz</strong>, and typical k. These set the dense/sparse threshold, the AMD/METIS threshold, and whether the exercise is worth doing at all.</li>
@@ -346,8 +390,8 @@ umfpack_dl_numeric   →  status = <b>UMFPACK_OK</b>,           rcond   = <b>9.0
 <div class="divider"></div>
 
 <footer class="col">
-  <p><strong>Status.</strong> Design and environment complete; no solver code written yet, as requested. This repository contains the full design document, the benchmark protocol, the two feasibility probes reproduced above, a vendored static SuiteSparse build script with 64-bit indices, the MEX build script, and the benchmark-matrix fetcher.</p>
-  <p>Measurements: Apple M1 (4 performance cores), Accelerate BLAS, SuiteSparse 7.14.0, clang 17, <code>-O2</code>. Both probes are in <code>probe/</code> and are reproducible with the commands in the README.</p>
+  <p><strong>Status.</strong> Solver written, compiled and validated; MEX gateway written and syntax-checked against both MATLAB API eras but not yet run against MATLAB. Source, tests, benchmarks and build scripts at <a href="https://github.com/moatas19m/sparse-eigs-mex">github.com/moatas19m/sparse-eigs-mex</a> — <code>make test</code> reproduces the validation, <code>make bench</code> the benchmark.</p>
+  <p>All measurements: Apple M1 (4 performance cores), Accelerate BLAS, SuiteSparse 7.14.0, clang 17 and gcc 16, <code>-O2</code>. Timings are medians of repeated warm runs; single cold runs varied by up to a factor of two, which is why nothing here rests on one.</p>
 </footer>
 
 </div>

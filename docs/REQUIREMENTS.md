@@ -35,6 +35,14 @@ My replacement attacks all three.
 
 ## 2. Is 5× achievable? — measured, not asserted
 
+> **Superseded by measurement.** This section's *model* predicted 6.0–8.2× end to
+> end with a risk zone below n ≈ 5,000. The finished solver measures **5.6× at
+> n = 64,000, 7.2× at n = 97,336, and 3.6–3.9× below n ≈ 58,000** — so the crossover
+> is roughly ten times higher in n than predicted here. The model priced the
+> triangular solves but not the iteration around them (~13% of the iteration phase).
+> The component timings below remain correct; the extrapolation from them did not.
+> See the [published report](https://moatas19m.github.io/sparse-eigs-mex/).
+
 I built a standalone probe (`probe/factor_probe.c`, `probe/psd_probe.c`) that times
 the two factorization paths on the same SPD matrix — a 3-D 7-point Laplacian, which
 has realistic FEM-like fill. Apple M1 (4 P-cores), Accelerate BLAS, SuiteSparse 7.14.0.
