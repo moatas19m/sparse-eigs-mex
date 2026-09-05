@@ -365,7 +365,7 @@ static int diag_path(speigs_int n, const speigs_int *Ap, const speigs_int *Ai,
 void speigs_default_opts(speigs_opts *o){
     memset(o,0,sizeof *o);
     o->tol=0.0; o->maxit=0; o->ncv=0; o->dense_max=-1; o->detect=1;
-    o->verbose=0; o->seed=0;
+    o->seed=0; o->ordering=0; o->shift0=0.0;
 }
 
 const char *speigs_errmsg(int c){

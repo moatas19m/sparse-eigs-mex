@@ -47,6 +47,26 @@ code: eigenvalues agree to 1e-12, the singular PSD case returns λ₀ = -4.3e-19
 constant null vector, and all three copies of a multiplicity-3 eigenvalue are found
 with mutually orthogonal eigenvectors.
 
+## What is implemented, and what is not
+
+| | status |
+|---|---|
+| Shift-invert Lanczos, CHOLMOD supernodal (`'sm'`) | done |
+| Direct Lanczos (`'lm'`) | done |
+| Semi-definite handling, adaptive shift + Rayleigh refinement | done |
+| Repeated eigenvalues (random re-injection on breakdown) | done |
+| Indefinite fallback to UMFPACK LU | done |
+| Diagonal-matrix short-circuit | done |
+| Dense LAPACK path for small n / large k/n | done |
+| MEX gateway, version-adaptive | written, **never run against MATLAB** |
+| **Connected-component splitting** | designed, **not implemented** |
+| **Banded (RCM + `dpbtrf`) path** | designed, **not implemented** |
+| **Triangular / zero-row detection** | designed, **not implemented** |
+| Complex Hermitian input | rejected with a clear error |
+
+`SPEIGS_PATH_BLOCKS` and `speigs_info.ncomp` exist in the header but are reserved:
+they are never set until component splitting lands.
+
 ## Layout
 
 ```

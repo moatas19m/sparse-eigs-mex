@@ -32,7 +32,8 @@ typedef enum {
     SPEIGS_PATH_DENSE     = 1,  /* small n or large k/n: LAPACK dsyevr       */
     SPEIGS_PATH_SHIFTINV  = 2,  /* Cholesky shift-invert Lanczos (fast path) */
     SPEIGS_PATH_DIRECT    = 3,  /* plain Lanczos on A ('lm')                 */
-    SPEIGS_PATH_BLOCKS    = 4,  /* split into connected components           */
+    SPEIGS_PATH_BLOCKS    = 4,  /* RESERVED -- connected-component splitting  *
+                                 * is designed but NOT YET IMPLEMENTED.      */
     SPEIGS_PATH_LU        = 5   /* indefinite: UMFPACK LU shift-invert       */
 } speigs_path;
 
@@ -42,7 +43,6 @@ typedef struct {
     speigs_int  ncv;        /* Krylov basis size; 0 => max(2k+1, 20)              */
     int         dense_max;  /* use dense path when n <= this; -1 => 800, 0 => off */
     int         detect;     /* 1 => run structure analysis (default), 0 => off    */
-    int         verbose;
     uint64_t    seed;       /* deterministic start vector; 0 => 88172645463325252 */
     int         ordering;   /* 0 = auto (size-based), 1 = AMD, 2 = METIS */
     double      shift0;     /* initial delta for a singular A, RELATIVE to ||A||_1;
@@ -58,7 +58,8 @@ typedef struct {
     double      shift;      /* delta actually used in A + delta*I             */
     double      anorm;      /* ||A||_1                                        */
     speigs_path path;
-    speigs_int  ncomp;      /* connected components detected                  */
+    speigs_int  ncomp;      /* RESERVED -- always 0 until component splitting *
+                             * is implemented.                                */
     double      t_analyze, t_factor, t_iter;
     double      t_op, t_ortho, t_resid, t_ritz;  /* iter-phase breakdown */
 } speigs_info;

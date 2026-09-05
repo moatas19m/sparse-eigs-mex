@@ -144,9 +144,20 @@ void mexFunction(int nlhs, mxArray *plhs[], int nrhs, const mxArray *prhs[])
         }
     }
     if (nlhs >= 4){   /* undocumented 4th output: diagnostics, for benchmarking */
+        /* Residuals are the evidence that a timing comparison is fair, so they
+         * are returned, not discarded: the benchmark protocol requires matched
+         * accuracy, which cannot be checked from MATLAB without them. */
         const char *fn[] = {"path","nops","restarts","shift","anorm","nconv",
-                            "t_analyze","t_factor","t_iter","api"};
-        plhs[3] = mxCreateStructMatrix(1,1,10,fn);
+                            "t_analyze","t_factor","t_iter","api","resid",
+                            "t_op","t_ortho","t_resid","t_ritz"};
+        plhs[3] = mxCreateStructMatrix(1,1,15,fn);
+        { mxArray *rv = mxCreateDoubleMatrix(k,1,mxREAL);
+          memcpy(SPEIGS_GET_PR(rv), res, (size_t)k*sizeof(double));
+          mxSetField(plhs[3],0,"resid", rv); }
+        mxSetField(plhs[3],0,"t_op",   mxCreateDoubleScalar(info.t_op));
+        mxSetField(plhs[3],0,"t_ortho",mxCreateDoubleScalar(info.t_ortho));
+        mxSetField(plhs[3],0,"t_resid",mxCreateDoubleScalar(info.t_resid));
+        mxSetField(plhs[3],0,"t_ritz", mxCreateDoubleScalar(info.t_ritz));
         mxSetField(plhs[3],0,"path",     mxCreateDoubleScalar((double)info.path));
         mxSetField(plhs[3],0,"nops",     mxCreateDoubleScalar((double)info.nops));
         mxSetField(plhs[3],0,"restarts", mxCreateDoubleScalar((double)info.restarts));
