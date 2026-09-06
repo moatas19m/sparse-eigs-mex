@@ -41,7 +41,7 @@ reorthogonalisation over a pluggable operator, so `'sm'` and `'lm'` share one pa
 
 ## Validation
 
-`make test` — 39 checks, 0 failures, under both clang and gcc. Correctness is
+`make test` — 66 checks, 0 failures, under both clang and gcc. Correctness is
 checked against the **closed-form** Laplacian spectra rather than another numerical
 code: eigenvalues agree to 1e-12, the singular PSD case returns λ₀ = -4.3e-19 with a
 constant null vector, and all three copies of a multiplicity-3 eigenvalue are found
@@ -59,13 +59,28 @@ with mutually orthogonal eigenvectors.
 | Diagonal-matrix short-circuit | done |
 | Dense LAPACK path for small n / large k/n | done |
 | MEX gateway, version-adaptive | written, **never run against MATLAB** |
-| **Connected-component splitting** | designed, **not implemented** |
-| **Banded (RCM + `dpbtrf`) path** | designed, **not implemented** |
-| **Triangular / zero-row detection** | designed, **not implemented** |
-| Complex Hermitian input | rejected with a clear error |
+| Connected-component splitting | done |
+| Banded path (RCM + LAPACK `dpbtrf`) | done, gated on measured band density |
+| Isolated nodes / numerically zero rows | done (falls out of component splitting) |
+| Complex Hermitian | done, via a real embedding of twice the size |
+| Triangular detection | **deliberately not implemented** — see below |
+| MEX gateway complex support | written, **never run against MATLAB** |
 
-`SPEIGS_PATH_BLOCKS` and `speigs_info.ncomp` exist in the header but are reserved:
-they are never set until component splitting lands.
+**Why there is no triangular detection.** For a symmetric matrix it would be either
+useless or wrong. If both triangles are stored, symmetric *and* triangular implies
+diagonal, which the diagonal path already catches. If only the upper triangle is
+stored — which this API explicitly allows — then every symmetric matrix *looks*
+triangular, and "detecting" it would return the diagonal as the spectrum. That is a
+silent wrong answer, so the check is omitted on purpose rather than by oversight.
+
+**Complex Hermitian** is handled by embedding `A = R + iS` as the real symmetric
+`[[R,-S],[S,R]]` of twice the size. This costs roughly 2x a native complex
+factorization, and buys reuse of the entire tested real pipeline — block splitting,
+banded, dense, the semi-definite shift, multiplicity handling — instead of
+reimplementing all of it in complex arithmetic. Recovering the complex eigenvectors
+needs complex Gram-Schmidt, not a pairwise parallelism test: for an eigenvalue of
+multiplicity m the embedding gives a 2m-real-dimensional space whose vectors can be
+pairwise non-parallel yet still C-linearly dependent.
 
 ## Layout
 

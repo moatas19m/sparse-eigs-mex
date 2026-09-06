@@ -33,6 +33,9 @@ extern void   dgemv_(const char*, lapack_int*, lapack_int*, const double*,
                      const double*, double*, lapack_int*);
 extern void   dsyev_(const char*, const char*, lapack_int*, double*, lapack_int*,
                      double*, double*, lapack_int*, lapack_int*);
+extern void   dpbtrf_(const char*, lapack_int*, lapack_int*, double*, lapack_int*, lapack_int*);
+extern void   dpbtrs_(const char*, lapack_int*, lapack_int*, lapack_int*, const double*,
+                      lapack_int*, double*, lapack_int*, lapack_int*);
 
 #define MAXI(a,b) ((a)>(b)?(a):(b))
 #define MINI(a,b) ((a)<(b)?(a):(b))
@@ -52,13 +55,18 @@ static void rand_vec(uint64_t *s, speigs_int n, double *v){
 
 /* ----------------------------------------------------------- operator ---- */
 typedef struct {
-    int             mode;      /* 0 = y = A x ; 1 = Cholesky solve ; 2 = LU solve */
+    int             mode;      /* 0 = A x ; 1 = Cholesky ; 2 = LU ; 3 = banded */
     cholmod_sparse *A;
     cholmod_common *cc;
     cholmod_factor *L;         /* mode 1 */
     cholmod_dense  *X, *Y, *E; /* cholmod_l_solve2 workspace, reused         */
     void           *Numeric;   /* mode 2 (UMFPACK) */
     const speigs_int *Ap, *Ai; const double *Ax;
+    /* mode 3: LAPACK banded Cholesky on the RCM-permuted matrix */
+    double         *AB;        /* band factor, (kd+1) x n, column major */
+    speigs_int     *perm;      /* RCM permutation                       */
+    double         *bw1,*bw2;  /* permute scratch                       */
+    speigs_int      kd;
     speigs_int      nops;
     speigs_int      n;
 } speigs_op;
@@ -88,6 +96,16 @@ static int op_apply(speigs_op *op, const double *x, double *y){
         if (!cholmod_l_solve2(CHOLMOD_A, op->L, &bd, NULL, &op->X, NULL,
                               &op->Y, &op->E, op->cc)) return SPEIGS_ERR_FACTOR;
         memcpy(y, op->X->x, (size_t)op->n * sizeof(double));
+        return 0;
+    }
+    if (op->mode == 3){
+        /* permute -> banded solve -> unpermute */
+        for (speigs_int i=0;i<op->n;i++) op->bw1[i] = x[op->perm[i]];
+        lapack_int N=(lapack_int)op->n, KD=(lapack_int)op->kd, one=1,
+                   ldab=(lapack_int)(op->kd+1), ierr=0;
+        dpbtrs_("U",&N,&KD,&one,op->AB,&ldab,op->bw1,&N,&ierr);
+        if (ierr) return SPEIGS_ERR_FACTOR;
+        for (speigs_int i=0;i<op->n;i++) y[op->perm[i]] = op->bw1[i];
         return 0;
     }
     /* mode 2: UMFPACK LU (indefinite fallback) */
@@ -361,11 +379,344 @@ static int diag_path(speigs_int n, const speigs_int *Ap, const speigs_int *Ai,
     free(d); free(ord); return SPEIGS_OK;
 }
 
+/* ------------------------------------------------- connected components ---- */
+/* An eigenvalue of A belongs to exactly one connected component, so the global
+ * k smallest by magnitude must lie among the per-component k smallest. Solving
+ * the blocks independently is therefore exact, not an approximation -- and it
+ * turns one large factorization into several small ones, which is superlinearly
+ * cheaper. eigs does none of this. */
+static speigs_int uf_find(speigs_int *p, speigs_int x){
+    while (p[x]!=x){ p[x]=p[p[x]]; x=p[x]; }
+    return x;
+}
+static void uf_union(speigs_int *p, speigs_int a, speigs_int b){
+    a=uf_find(p,a); b=uf_find(p,b); if (a!=b) p[a]=b;
+}
+/* Returns number of components; comp[i] in [0,ncomp). Numerically zero entries
+ * do not connect, so a structurally-present-but-zero row is correctly isolated. */
+static speigs_int find_components(speigs_int n, const speigs_int *Ap,
+                                  const speigs_int *Ai, const double *Ax,
+                                  speigs_int *comp)
+{
+    speigs_int *p = (speigs_int*)malloc((size_t)n*sizeof(speigs_int));
+    if (!p) return -1;
+    for (speigs_int i=0;i<n;i++) p[i]=i;
+    for (speigs_int c=0;c<n;c++)
+        for (speigs_int q=Ap[c];q<Ap[c+1];q++)
+            if (Ax[q] != 0.0) uf_union(p, Ai[q], c);
+    speigs_int *lab=(speigs_int*)malloc((size_t)n*sizeof(speigs_int));
+    if (!lab){ free(p); return -1; }
+    for (speigs_int i=0;i<n;i++) lab[i]=-1;
+    speigs_int nc=0;
+    for (speigs_int i=0;i<n;i++){
+        speigs_int r=uf_find(p,i);
+        if (lab[r]<0) lab[r]=nc++;
+        comp[i]=lab[r];
+    }
+    free(p); free(lab);
+    return nc;
+}
+
+/* ------------------------------------------------------------- RCM --------- */
+/* Reverse Cuthill-McKee, for the banded path. Level-set BFS from a low-degree
+ * node, neighbours visited in increasing degree, then reversed. */
+static void rcm_order(speigs_int n, const speigs_int *Ap, const speigs_int *Ai,
+                      speigs_int *perm)
+{
+    speigs_int *deg=(speigs_int*)calloc(n,sizeof(speigs_int));
+    char *seen=(char*)calloc(n,1);
+    speigs_int *q=(speigs_int*)malloc((size_t)n*sizeof(speigs_int));
+    if (!deg || !seen || !q){
+        free(deg); free(seen); free(q);
+        for (speigs_int i=0;i<n;i++) perm[i]=i;   /* identity on allocation failure */
+        return;
+    }
+    for (speigs_int c=0;c<n;c++) deg[c] = Ap[c+1]-Ap[c];
+    speigs_int head=0, tail=0;
+    for (speigs_int start=0; start<n; start++){
+        if (seen[start]) continue;
+        /* seed each component at its lowest-degree unvisited node */
+        speigs_int s=start, best=deg[start];
+        for (speigs_int i=start;i<n;i++)
+            if (!seen[i] && deg[i]<best){ best=deg[i]; s=i; }
+        seen[s]=1; q[tail++]=s;
+        while (head<tail){
+            speigs_int v=q[head++], b0=tail;
+            for (speigs_int p2=Ap[v];p2<Ap[v+1];p2++){
+                speigs_int w=Ai[p2];
+                if (!seen[w]){ seen[w]=1; q[tail++]=w; }
+            }
+            /* insertion-sort the newly added neighbours by degree */
+            for (speigs_int a=b0+1;a<tail;a++){
+                speigs_int key=q[a], d=deg[key], b=a-1;
+                while (b>=b0 && deg[q[b]]>d){ q[b+1]=q[b]; b--; }
+                q[b+1]=key;
+            }
+        }
+    }
+    for (speigs_int i=0;i<n;i++) perm[i]=q[n-1-i];      /* reverse */
+    free(deg); free(seen); free(q);
+}
+/* bandwidth of P A P^T given perm (perm[newindex] = oldindex) */
+static speigs_int bandwidth_of(speigs_int n, const speigs_int *Ap, const speigs_int *Ai,
+                               const speigs_int *perm, speigs_int *iperm)
+{
+    for (speigs_int i=0;i<n;i++) iperm[perm[i]]=i;
+    speigs_int kd=0;
+    for (speigs_int c=0;c<n;c++){
+        speigs_int nc=iperm[c];
+        for (speigs_int q=Ap[c];q<Ap[c+1];q++){
+            speigs_int nr=iperm[Ai[q]];
+            speigs_int d = nr>nc ? nr-nc : nc-nr;
+            if (d>kd) kd=d;
+        }
+    }
+    return kd;
+}
+
+/* ------------------------------------------------------ block splitting ---- */
+/* forward decl: each block is solved by a full recursive call. A block is
+ * connected by construction, so the recursion is one level deep. */
+int speigs(speigs_int, const speigs_int*, const speigs_int*, const double*,
+           speigs_int, speigs_which, const speigs_opts*,
+           double*, double*, double*, speigs_info*);
+
+static int blocks_path(speigs_int n, const speigs_int *Ap, const speigs_int *Ai,
+                       const double *Ax, speigs_int k, speigs_which which,
+                       const speigs_opts *opts, const speigs_int *comp,
+                       speigs_int ncomp, double *lambda, double *V,
+                       double *resid, speigs_info *info)
+{
+    int rc = SPEIGS_OK;
+    speigs_int *sz=NULL,*off=NULL,*gidx=NULL,*loc=NULL,*fill=NULL;
+    speigs_int *sAp=NULL,*sAi=NULL; double *sAx=NULL;
+    double **cvec=NULL, *clam=NULL, *cres=NULL;
+    speigs_int *ccomp=NULL, *cslot=NULL;
+    kv_t *ord=NULL;
+
+    sz  =(speigs_int*)calloc(ncomp,sizeof(speigs_int));
+    off =(speigs_int*)calloc(ncomp+1,sizeof(speigs_int));
+    gidx=(speigs_int*)malloc((size_t)n*sizeof(speigs_int));
+    loc =(speigs_int*)malloc((size_t)n*sizeof(speigs_int));
+    fill=(speigs_int*)calloc(ncomp,sizeof(speigs_int));
+    if(!sz||!off||!gidx||!loc||!fill){ rc=SPEIGS_ERR_MEM; goto done; }
+
+    for (speigs_int i=0;i<n;i++) sz[comp[i]]++;
+    for (speigs_int ci=0;ci<ncomp;ci++) off[ci+1]=off[ci]+sz[ci];
+    /* gidx is ascending within each component, which keeps the extracted
+     * sub-matrix's row indices sorted -- required by CHOLMOD. */
+    for (speigs_int i=0;i<n;i++){
+        speigs_int ci=comp[i]; speigs_int slot=off[ci]+fill[ci]++;
+        gidx[slot]=i; loc[i]=slot-off[ci];
+    }
+
+    speigs_int maxcand=0;
+    for (speigs_int ci=0;ci<ncomp;ci++) maxcand += MINI(k, sz[ci]);
+    cvec =(double**)calloc(ncomp,sizeof(double*));
+    clam =(double*)calloc(maxcand,sizeof(double));
+    cres =(double*)calloc(maxcand,sizeof(double));
+    ccomp=(speigs_int*)calloc(maxcand,sizeof(speigs_int));
+    cslot=(speigs_int*)calloc(maxcand,sizeof(speigs_int));
+    ord  =(kv_t*)calloc(maxcand,sizeof(kv_t));
+    if(!cvec||!clam||!cres||!ccomp||!cslot||!ord){ rc=SPEIGS_ERR_MEM; goto done; }
+
+    speigs_int ncand=0, nnzmax=Ap[n];
+    sAp=(speigs_int*)malloc((size_t)(n+1)*sizeof(speigs_int));
+    sAi=(speigs_int*)malloc((size_t)(nnzmax?nnzmax:1)*sizeof(speigs_int));
+    sAx=(double*)malloc((size_t)(nnzmax?nnzmax:1)*sizeof(double));
+    if(!sAp||!sAi||!sAx){ rc=SPEIGS_ERR_MEM; goto done; }
+
+    for (speigs_int ci=0; ci<ncomp; ci++){
+        speigs_int nc=sz[ci], knt=0;
+        for (speigs_int j=0;j<nc;j++){
+            speigs_int gc=gidx[off[ci]+j];
+            sAp[j]=knt;
+            for (speigs_int q=Ap[gc];q<Ap[gc+1];q++){
+                speigs_int r=Ai[q];
+                if (comp[r]==ci){ sAi[knt]=loc[r]; sAx[knt]=Ax[q]; knt++; }
+            }
+        }
+        sAp[nc]=knt;
+
+        speigs_int kc=MINI(k,nc);
+        double *lv=(double*)calloc(kc,sizeof(double));
+        double *rv=(double*)calloc(kc,sizeof(double));
+        double *vv=V ? (double*)calloc((size_t)nc*kc,sizeof(double)) : NULL;
+        if(!lv||!rv||(V&&!vv)){ free(lv);free(rv);free(vv); rc=SPEIGS_ERR_MEM; goto done; }
+
+        speigs_info si;
+        int r2 = speigs(nc,sAp,sAi,sAx,kc,which,opts,lv,vv,rv,&si);
+        if (r2){ free(lv);free(rv);free(vv); rc=r2; goto done; }
+        info->nops += si.nops;
+        if (si.flag) info->flag = 1;
+
+        cvec[ci]=vv;
+        for (speigs_int t=0;t<kc;t++){
+            clam[ncand]=lv[t]; cres[ncand]=rv[t];
+            ccomp[ncand]=ci;   cslot[ncand]=t; ncand++;
+        }
+        free(lv); free(rv);
+    }
+
+    for (speigs_int i=0;i<ncand;i++){ ord[i].key=fabs(clam[i]); ord[i].idx=(int)i; }
+    qsort(ord,(size_t)ncand,sizeof(kv_t), which==SPEIGS_SM?kv_asc:kv_desc);
+
+    for (speigs_int t=0;t<k && t<ncand;t++){
+        int i=ord[t].idx; speigs_int ci=ccomp[i], sl=cslot[i], nc=sz[ci];
+        lambda[t]=clam[i];
+        if (resid) resid[t]=cres[i];
+        if (V){
+            memset(V+(size_t)t*n, 0, (size_t)n*sizeof(double));
+            const double *src = cvec[ci] + (size_t)sl*nc;
+            for (speigs_int j=0;j<nc;j++) V[(size_t)t*n + gidx[off[ci]+j]] = src[j];
+        }
+    }
+    info->nconv = MINI(k,ncand);
+    info->ncomp = ncomp;
+    info->path  = SPEIGS_PATH_BLOCKS;
+
+done:
+    if (cvec){ for (speigs_int ci=0;ci<ncomp;ci++) free(cvec[ci]); free(cvec); }
+    free(sz); free(off); free(gidx); free(loc); free(fill);
+    free(sAp); free(sAi); free(sAx);
+    free(clam); free(cres); free(ccomp); free(cslot); free(ord);
+    return rc;
+}
+
 /* ------------------------------------------------------------ driver ------ */
 void speigs_default_opts(speigs_opts *o){
     memset(o,0,sizeof *o);
     o->tol=0.0; o->maxit=0; o->ncv=0; o->dense_max=-1; o->detect=1;
-    o->seed=0; o->ordering=0; o->shift0=0.0;
+    o->seed=0; o->ordering=0; o->shift0=0.0; o->band_max=0;
+}
+
+
+/* ------------------------------------------------- complex Hermitian ------ */
+/* Reduced to a real symmetric problem of twice the size rather than duplicating
+ * the whole pipeline in complex arithmetic.
+ *
+ *   A = R + iS Hermitian  =>  R symmetric, S skew-symmetric
+ *   Atilde = [[R, -S], [S, R]]   is real symmetric, 2n x 2n
+ *   A(x+iy) = lambda(x+iy)  <=>  Atilde [x;y] = lambda [x;y]
+ *
+ * Every eigenvalue of A appears twice in Atilde, via [x;y] and [-y;x] -- which
+ * are the same complex direction up to a factor of i, so the duplicates are
+ * removed by a parallelism test on the recovered complex vectors.
+ *
+ * The cost is roughly 2x a native complex factorization. That trade is
+ * deliberate: it reuses the entire tested real pipeline -- block splitting,
+ * banded, dense, the semi-definite shift, multiplicity handling -- instead of
+ * reimplementing all of it in complex arithmetic, where every bug would be new
+ * and untested. Native complex kernels are the future optimisation, not a
+ * correctness prerequisite. */
+int speigs_z(speigs_int n,
+             const speigs_int *Ap, const speigs_int *Ai,
+             const double *Axr, const double *Axi,
+             speigs_int k, speigs_which which, const speigs_opts *opts,
+             double *lambda, double *Vr, double *Vi, double *resid,
+             speigs_info *info)
+{
+    if (!Axi) return speigs(n,Ap,Ai,Axr,k,which,opts,lambda,Vr,resid,info);
+    if (n<=0 || k<=0 || k>n || !Ap || !Ai || !Axr || !lambda) return SPEIGS_ERR_ARG;
+
+    speigs_int n2 = 2*n, nnz = Ap[n], nzR=0, nzS=0;
+    for (speigs_int q=0;q<nnz;q++){ if (Axr[q]!=0.0) nzR++; if (Axi[q]!=0.0) nzS++; }
+    speigs_int nz2 = 2*(nzR+nzS);
+
+    speigs_int *Bp=(speigs_int*)malloc((size_t)(n2+1)*sizeof(speigs_int));
+    speigs_int *Bi=(speigs_int*)malloc((size_t)(nz2?nz2:1)*sizeof(speigs_int));
+    double     *Bx=(double*)malloc((size_t)(nz2?nz2:1)*sizeof(double));
+    if (!Bp||!Bi||!Bx){ free(Bp);free(Bi);free(Bx); return SPEIGS_ERR_MEM; }
+
+    speigs_int t=0;
+    for (speigs_int j=0;j<n;j++){                       /* column j: [R;S] */
+        Bp[j]=t;
+        for (speigs_int q=Ap[j];q<Ap[j+1];q++)
+            if (Axr[q]!=0.0){ Bi[t]=Ai[q];   Bx[t]=Axr[q]; t++; }
+        for (speigs_int q=Ap[j];q<Ap[j+1];q++)
+            if (Axi[q]!=0.0){ Bi[t]=n+Ai[q]; Bx[t]=Axi[q]; t++; }
+    }
+    for (speigs_int j=0;j<n;j++){                       /* column n+j: [-S;R] */
+        Bp[n+j]=t;
+        for (speigs_int q=Ap[j];q<Ap[j+1];q++)
+            if (Axi[q]!=0.0){ Bi[t]=Ai[q];   Bx[t]=-Axi[q]; t++; }
+        for (speigs_int q=Ap[j];q<Ap[j+1];q++)
+            if (Axr[q]!=0.0){ Bi[t]=n+Ai[q]; Bx[t]=Axr[q];  t++; }
+    }
+    Bp[n2]=t;
+
+    /* ask for extra: each wanted eigenvalue appears twice in the embedding */
+    speigs_int kk = MINI(2*k+2, n2);
+    double *lam2=(double*)calloc(kk,sizeof(double));
+    double *res2=(double*)calloc(kk,sizeof(double));
+    double *V2  =(double*)calloc((size_t)n2*kk,sizeof(double));
+    int rc = SPEIGS_OK;
+    if (!lam2||!res2||!V2){ rc=SPEIGS_ERR_MEM; goto done; }
+
+    rc = speigs(n2,Bp,Bi,Bx,kk,which,opts,lam2,V2,res2,info);
+    if (rc) goto done;
+
+    /* recover complex eigenpairs, discarding the i-multiples */
+    {
+    speigs_int nacc=0;
+    double *ar=(double*)calloc((size_t)n*k,sizeof(double));
+    double *ai=(double*)calloc((size_t)n*k,sizeof(double));
+    if (!ar||!ai){ free(ar); free(ai); rc=SPEIGS_ERR_MEM; goto done; }
+    for (speigs_int c=0;c<kk && nacc<k;c++){
+        const double *a = V2 + (size_t)c*n2, *b = a + n;
+        double nr=0.0; for (speigs_int i=0;i<n;i++) nr += a[i]*a[i]+b[i]*b[i];
+        if (nr <= 0.0) continue;
+        nr = 1.0/sqrt(nr);
+        /* Complex Gram-Schmidt, not a pairwise parallelism test. For an
+         * eigenvalue of multiplicity m the embedding yields a 2m-real-
+         * dimensional space, and vectors drawn from it can be pairwise
+         * non-parallel yet still C-linearly DEPENDENT -- a pairwise test
+         * accepts too many and returns the same eigenvalue m+1 times. */
+        double *wr=(double*)malloc((size_t)n*sizeof(double));
+        double *wi=(double*)malloc((size_t)n*sizeof(double));
+        if (!wr||!wi){ free(wr); free(wi); free(ar); free(ai); rc=SPEIGS_ERR_MEM; goto done; }
+        for (speigs_int i=0;i<n;i++){ wr[i]=a[i]*nr; wi[i]=b[i]*nr; }
+        for (int pass=0; pass<2; pass++)
+            for (speigs_int u=0; u<nacc; u++){
+                double re=0.0, im=0.0;            /* <v_u, w> = sum conj(u) w */
+                for (speigs_int i=0;i<n;i++){
+                    double ur=ar[(size_t)u*n+i], ui=ai[(size_t)u*n+i];
+                    re += ur*wr[i] + ui*wi[i];
+                    im += ur*wi[i] - ui*wr[i];
+                }
+                for (speigs_int i=0;i<n;i++){     /* w -= <u,w> u */
+                    double ur=ar[(size_t)u*n+i], ui=ai[(size_t)u*n+i];
+                    wr[i] -= re*ur - im*ui;
+                    wi[i] -= re*ui + im*ur;
+                }
+            }
+        double wn=0.0; for (speigs_int i=0;i<n;i++) wn += wr[i]*wr[i]+wi[i]*wi[i];
+        wn = sqrt(wn);
+        int dup = (wn <= 0.1);
+        if (!dup){
+            double inv=1.0/wn;
+            for (speigs_int i=0;i<n;i++){ wr[i]*=inv; wi[i]*=inv; }
+        }
+        if (dup){ free(wr); free(wi); continue; }
+        for (speigs_int i=0;i<n;i++){
+            ar[(size_t)nacc*n+i]=wr[i];
+            ai[(size_t)nacc*n+i]=wi[i];
+        }
+        free(wr); free(wi);
+        lambda[nacc]=lam2[c];
+        if (resid) resid[nacc]=res2[c];
+        nacc++;
+    }
+    if (Vr) memcpy(Vr,ar,(size_t)n*k*sizeof(double));
+    if (Vi) memcpy(Vi,ai,(size_t)n*k*sizeof(double));
+    free(ar); free(ai);
+    info->nconv = nacc;
+    info->flag  = (nacc>=k) ? info->flag : 1;
+    }
+
+done:
+    free(Bp); free(Bi); free(Bx); free(lam2); free(res2); free(V2);
+    return rc;
 }
 
 const char *speigs_errmsg(int c){
@@ -404,6 +755,23 @@ int speigs(speigs_int n, const speigs_int *Ap, const speigs_int *Ai, const doubl
         return rc;
     }
 
+    /* Split on connected components before doing any numerical work. Exact,
+     * not approximate: each eigenvalue lives in exactly one block. */
+    if (opts->detect){
+        speigs_int *comp=(speigs_int*)malloc((size_t)n*sizeof(speigs_int));
+        if (comp){
+            speigs_int ncomp = find_components(n,Ap,Ai,Ax,comp);
+            if (ncomp > 1){
+                int rc = blocks_path(n,Ap,Ai,Ax,k,which,opts,comp,ncomp,
+                                     lambda,V,resid,info);
+                free(comp);
+                info->t_iter = wall()-t0;
+                return rc;
+            }
+            free(comp);
+        }
+    }
+
     cholmod_common cc; cholmod_l_start(&cc);
     cc.supernodal = CHOLMOD_SUPERNODAL;
     cc.print = 0; cc.error_handler = NULL;
@@ -439,6 +807,74 @@ int speigs(speigs_int n, const speigs_int *Ap, const speigs_int *Ai, const doubl
             opts->ordering==1 ? CHOLMOD_AMD :
             opts->ordering==2 ? CHOLMOD_METIS :
             ((n >= 12000) ? CHOLMOD_METIS : CHOLMOD_AMD);
+
+        /* Banded path. If RCM produces a narrow band, LAPACK's banded Cholesky
+         * needs no ordering search and no supernode assembly, and works on
+         * contiguous memory. Gated on measurement, not on principle: see
+         * bench/bench_banded. */
+        int bmax = opts->band_max ? opts->band_max : 512;
+        if (bmax > 0){
+            double tb=wall();
+            speigs_int *pm=(speigs_int*)malloc((size_t)n*sizeof(speigs_int));
+            speigs_int *ip=(speigs_int*)malloc((size_t)n*sizeof(speigs_int));
+            if (pm && ip){
+                rcm_order(n,Ap,Ai,pm);
+                speigs_int kd = bandwidth_of(n,Ap,Ai,pm,ip);
+                double cells = (double)(kd+1)*(double)n;
+                /* Gate on band DENSITY, not bandwidth alone. Measured at
+                 * n=50,000 with a band that is dense, LAPACK beats CHOLMOD by
+                 * 1.15x at kd=1 rising to 3.87x at kd=256. But on a band that
+                 * is mostly empty -- a 2-D Laplacian has bandwidth m and only 5
+                 * nonzeros per row -- the two are a coin flip (0.90x to 1.19x),
+                 * and banded storage burns O(n*kd) memory for zeros. So require
+                 * the band to be at least 5% occupied. */
+                double occupancy = (kd>0) ? (double)Ap[n] / ((double)n*(double)kd)
+                                          : 1.0;
+                if (kd <= bmax && cells <= 2.0e7 && occupancy >= 0.05){
+                    double *AB=(double*)calloc((size_t)cells,sizeof(double));
+                    if (AB){
+                        speigs_int ldab=kd+1;
+                        for (speigs_int col=0;col<n;col++){
+                            speigs_int nc2=ip[col];
+                            for (speigs_int q=Ap[col];q<Ap[col+1];q++){
+                                speigs_int nr=ip[Ai[q]];
+                                speigs_int lo = nr<nc2?nr:nc2, hi = nr<nc2?nc2:nr;
+                                AB[(kd+lo-hi) + (size_t)hi*ldab] = Ax[q];
+                            }
+                        }
+                        double dlt=0.0; lapack_int N=(lapack_int)n,
+                            KD=(lapack_int)kd, LD=(lapack_int)ldab, ierr=0;
+                        double *ABw=(double*)malloc((size_t)cells*sizeof(double));
+                        if (ABw){
+                            memcpy(ABw,AB,(size_t)cells*sizeof(double));
+                            dpbtrf_("U",&N,&KD,ABw,&LD,&ierr);
+                            if (ierr>0){         /* not PD: same capped escalation */
+                                double d0=anorm*(opts->shift0>0?opts->shift0:1e-6);
+                                double dcap=anorm*1e-3; if(d0>dcap) dcap=d0;
+                                for (dlt=d0; dlt<=dcap*1.0000001 && ierr>0; dlt*=10.0){
+                                    memcpy(ABw,AB,(size_t)cells*sizeof(double));
+                                    for (speigs_int j=0;j<n;j++) ABw[kd+(size_t)j*ldab]+=dlt;
+                                    ierr=0; dpbtrf_("U",&N,&KD,ABw,&LD,&ierr);
+                                }
+                                if (ierr>0) dlt=0.0;
+                            }
+                            if (ierr==0){
+                                op.mode=3; op.AB=ABw; op.perm=pm; op.kd=kd;
+                                op.bw1=(double*)calloc(n,sizeof(double));
+                                op.bw2=(double*)calloc(n,sizeof(double));
+                                info->shift=dlt; info->path=SPEIGS_PATH_BANDED;
+                                info->t_factor=wall()-tb;
+                                free(AB); free(ip);
+                                goto have_operator;
+                            }
+                            free(ABw);
+                        }
+                        free(AB);
+                    }
+                }
+            }
+            free(pm); free(ip);
+        }
 
         double ta=wall();
         L = cholmod_l_analyze(&A,&cc);
@@ -494,6 +930,7 @@ int speigs(speigs_int n, const speigs_int *Ap, const speigs_int *Ai, const doubl
         }
         info->t_factor = wall()-tf;
     }
+have_operator:
 
     { double ti=wall();
       rc = lanczos(&op,n,k,opts,anorm,lambda,V,resid,info);
@@ -521,6 +958,7 @@ int speigs(speigs_int n, const speigs_int *Ap, const speigs_int *Ai, const doubl
     }
 
 cleanup:
+    free(op.AB); free(op.perm); free(op.bw1); free(op.bw2);
     if (op.X) cholmod_l_free_dense(&op.X,&cc);
     if (op.Y) cholmod_l_free_dense(&op.Y,&cc);
     if (op.E) cholmod_l_free_dense(&op.E,&cc);

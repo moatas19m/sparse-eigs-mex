@@ -32,9 +32,9 @@ typedef enum {
     SPEIGS_PATH_DENSE     = 1,  /* small n or large k/n: LAPACK dsyevr       */
     SPEIGS_PATH_SHIFTINV  = 2,  /* Cholesky shift-invert Lanczos (fast path) */
     SPEIGS_PATH_DIRECT    = 3,  /* plain Lanczos on A ('lm')                 */
-    SPEIGS_PATH_BLOCKS    = 4,  /* RESERVED -- connected-component splitting  *
-                                 * is designed but NOT YET IMPLEMENTED.      */
-    SPEIGS_PATH_LU        = 5   /* indefinite: UMFPACK LU shift-invert       */
+    SPEIGS_PATH_BLOCKS    = 4,  /* split into connected components           */
+    SPEIGS_PATH_LU        = 5,  /* indefinite: UMFPACK LU shift-invert       */
+    SPEIGS_PATH_BANDED    = 6   /* narrow band after RCM: LAPACK dpbtrf      */
 } speigs_path;
 
 typedef struct {
@@ -44,6 +44,8 @@ typedef struct {
     int         dense_max;  /* use dense path when n <= this; -1 => 800, 0 => off */
     int         detect;     /* 1 => run structure analysis (default), 0 => off    */
     uint64_t    seed;       /* deterministic start vector; 0 => 88172645463325252 */
+    int         band_max;   /* banded path if RCM bandwidth <= this; 0 => 128,
+                             * negative disables it entirely.                 */
     int         ordering;   /* 0 = auto (size-based), 1 = AMD, 2 = METIS */
     double      shift0;     /* initial delta for a singular A, RELATIVE to ||A||_1;
                              * 0 => tuned default. Exposed because the right value
@@ -58,8 +60,7 @@ typedef struct {
     double      shift;      /* delta actually used in A + delta*I             */
     double      anorm;      /* ||A||_1                                        */
     speigs_path path;
-    speigs_int  ncomp;      /* RESERVED -- always 0 until component splitting *
-                             * is implemented.                                */
+    speigs_int  ncomp;      /* connected components found (1 if none split)   */
     double      t_analyze, t_factor, t_iter;
     double      t_op, t_ortho, t_resid, t_ritz;  /* iter-phase breakdown */
 } speigs_info;
@@ -79,6 +80,19 @@ int speigs(speigs_int n,
            const speigs_int *Ap, const speigs_int *Ai, const double *Ax,
            speigs_int k, speigs_which which, const speigs_opts *opts,
            double *lambda, double *V, double *resid, speigs_info *info);
+
+/* Complex Hermitian. Values are supplied as separate real and imaginary arrays
+ * (the pre-R2018a MATLAB layout; trivially derived from the interleaved one).
+ * A Hermitian matrix has a real spectrum, so lambda is real.
+ *
+ * Vr[n*k], Vi[n*k]: real and imaginary parts of the eigenvectors, column-major.
+ * Pass Axi = NULL for a real symmetric matrix (equivalent to speigs()). */
+int speigs_z(speigs_int n,
+             const speigs_int *Ap, const speigs_int *Ai,
+             const double *Axr, const double *Axi,
+             speigs_int k, speigs_which which, const speigs_opts *opts,
+             double *lambda, double *Vr, double *Vi, double *resid,
+             speigs_info *info);
 
 const char *speigs_errmsg(int code);
 

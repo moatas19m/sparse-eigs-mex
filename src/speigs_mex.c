@@ -51,9 +51,6 @@ void mexFunction(int nlhs, mxArray *plhs[], int nrhs, const mxArray *prhs[])
     const mxArray *Am = prhs[0];
     if (!mxIsSparse(Am) || !mxIsDouble(Am))
         mexErrMsgIdAndTxt("speigs:type","A must be a sparse double matrix.");
-    if (mxIsComplex(Am))
-        mexErrMsgIdAndTxt("speigs:complex",
-            "A must be real symmetric. Complex Hermitian input is not yet supported.");
 
     mwSize n = mxGetM(Am);
     if (n != mxGetN(Am))
@@ -85,6 +82,9 @@ void mexFunction(int nlhs, mxArray *plhs[], int nrhs, const mxArray *prhs[])
             o.dense_max = (int)get_scalar_field(prhs[2],"dense_max",-1);
             o.seed      = (uint64_t)get_scalar_field(prhs[2],"seed",0);
             o.shift0    = get_scalar_field(prhs[2],"shift0",0.0);
+            o.ordering  = (int)get_scalar_field(prhs[2],"ordering",0);
+            o.band_max  = (int)get_scalar_field(prhs[2],"band_max",0);
+            o.detect    = (int)get_scalar_field(prhs[2],"detect",1);
             const mxArray *wf = mxGetField(prhs[2],0,"which");
             if (wf && mxIsChar(wf)){
                 char buf[16]; mxGetString(wf,buf,sizeof buf);
@@ -98,8 +98,28 @@ void mexFunction(int nlhs, mxArray *plhs[], int nrhs, const mxArray *prhs[])
      * the same width we bind with zero copies. They differ only in 32-bit
      * builds (mex without -largeArrayDims), where we must convert. */
     const mwIndex *jc = mxGetJc(Am), *ir = mxGetIr(Am);
-    const double  *pr = SPEIGS_GET_PR(Am);
     mwSize nnz = jc[n];
+    int is_cplx = mxIsComplex(Am);
+
+    /* Complex values reach us differently depending on the release: separate
+     * real/imaginary arrays before R2018a, interleaved from R2018a. The core
+     * wants separate arrays, so only the newer layout needs de-interleaving. */
+    const double *pr = NULL; double *zr=NULL, *zi=NULL;
+    if (!is_cplx){
+        pr = SPEIGS_GET_PR(Am);
+    } else {
+#if defined(MX_HAS_INTERLEAVED_COMPLEX) && MX_HAS_INTERLEAVED_COMPLEX
+        const mxComplexDouble *cz = mxGetComplexDoubles(Am);
+        zr = (double*)mxMalloc((nnz?nnz:1)*sizeof(double));
+        zi = (double*)mxMalloc((nnz?nnz:1)*sizeof(double));
+        for (mwSize i=0;i<nnz;i++){ zr[i]=cz[i].real; zi[i]=cz[i].imag; }
+#else
+        zr = mxGetPr(Am);            /* already separate: no copy needed */
+        zi = mxGetPi(Am);
+        if (!zi) is_cplx = 0;
+        if (!is_cplx) pr = zr;
+#endif
+    }
 
     speigs_int *Ap, *Ai;
     int owns = 0;
@@ -116,13 +136,40 @@ void mexFunction(int nlhs, mxArray *plhs[], int nrhs, const mxArray *prhs[])
     int want_vec = (nlhs >= 2);
     double *lam = (double*)mxCalloc(k, sizeof(double));
     double *res = (double*)mxCalloc(k, sizeof(double));
-    mxArray *Vm = want_vec ? mxCreateDoubleMatrix(n, k, mxREAL) : NULL;
-    double  *V  = want_vec ? SPEIGS_GET_PR(Vm) : NULL;
+    double *Vr=NULL, *Vi=NULL, *V=NULL;
+    mxArray *Vm = NULL;
+    if (want_vec){
+        if (is_cplx){
+            Vr = (double*)mxCalloc((size_t)n*k, sizeof(double));
+            Vi = (double*)mxCalloc((size_t)n*k, sizeof(double));
+        } else {
+            Vm = mxCreateDoubleMatrix(n, k, mxREAL);
+            V  = SPEIGS_GET_PR(Vm);
+        }
+    }
 
     speigs_info info;
-    int rc = speigs((speigs_int)n, Ap, Ai, pr, k, which, &o, lam, V, res, &info);
+    int rc = is_cplx
+        ? speigs_z((speigs_int)n, Ap, Ai, zr, zi, k, which, &o, lam, Vr, Vi, res, &info)
+        : speigs((speigs_int)n, Ap, Ai, pr, k, which, &o, lam, V, res, &info);
+
+    /* pack the complex eigenvectors into a MATLAB complex array */
+    if (want_vec && is_cplx && rc == SPEIGS_OK){
+        Vm = mxCreateDoubleMatrix(n, k, mxCOMPLEX);
+#if defined(MX_HAS_INTERLEAVED_COMPLEX) && MX_HAS_INTERLEAVED_COMPLEX
+        mxComplexDouble *vz = mxGetComplexDoubles(Vm);
+        for (mwSize i=0;i<(mwSize)n*k;i++){ vz[i].real=Vr[i]; vz[i].imag=Vi[i]; }
+#else
+        memcpy(mxGetPr(Vm), Vr, (size_t)n*k*sizeof(double));
+        memcpy(mxGetPi(Vm), Vi, (size_t)n*k*sizeof(double));
+#endif
+    }
 
     if (owns){ mxFree(Ap); mxFree(Ai); }
+    mxFree(Vr); mxFree(Vi);
+#if defined(MX_HAS_INTERLEAVED_COMPLEX) && MX_HAS_INTERLEAVED_COMPLEX
+    if (is_cplx){ mxFree(zr); mxFree(zi); }
+#endif
 
     if (rc != SPEIGS_OK){
         if (Vm) mxDestroyArray(Vm);
@@ -149,8 +196,8 @@ void mexFunction(int nlhs, mxArray *plhs[], int nrhs, const mxArray *prhs[])
          * accuracy, which cannot be checked from MATLAB without them. */
         const char *fn[] = {"path","nops","restarts","shift","anorm","nconv",
                             "t_analyze","t_factor","t_iter","api","resid",
-                            "t_op","t_ortho","t_resid","t_ritz"};
-        plhs[3] = mxCreateStructMatrix(1,1,15,fn);
+                            "t_op","t_ortho","t_resid","t_ritz","ncomp"};
+        plhs[3] = mxCreateStructMatrix(1,1,16,fn);
         { mxArray *rv = mxCreateDoubleMatrix(k,1,mxREAL);
           memcpy(SPEIGS_GET_PR(rv), res, (size_t)k*sizeof(double));
           mxSetField(plhs[3],0,"resid", rv); }
@@ -158,6 +205,7 @@ void mexFunction(int nlhs, mxArray *plhs[], int nrhs, const mxArray *prhs[])
         mxSetField(plhs[3],0,"t_ortho",mxCreateDoubleScalar(info.t_ortho));
         mxSetField(plhs[3],0,"t_resid",mxCreateDoubleScalar(info.t_resid));
         mxSetField(plhs[3],0,"t_ritz", mxCreateDoubleScalar(info.t_ritz));
+        mxSetField(plhs[3],0,"ncomp",  mxCreateDoubleScalar((double)info.ncomp));
         mxSetField(plhs[3],0,"path",     mxCreateDoubleScalar((double)info.path));
         mxSetField(plhs[3],0,"nops",     mxCreateDoubleScalar((double)info.nops));
         mxSetField(plhs[3],0,"restarts", mxCreateDoubleScalar((double)info.restarts));
