@@ -388,6 +388,56 @@ static void test_hermitian(int64_t N,int64_t k){
     free(lam);free(res);free(Vr);free(Vi);
 }
 
+
+/* ---- non-symmetric input must be REJECTED, not silently symmetrised ------ */
+static void test_nonsymmetric(void){
+    printf("\n[12] Non-symmetric input -- must be rejected, not silently symmetrised\n");
+    int64_t n=5000,k=3;
+    int64_t *Ap=malloc((n+1)*sizeof(int64_t)),*Ai=malloc(3*n*sizeof(int64_t));
+    double *Ax=malloc(3*n*sizeof(double)); int64_t q=0;
+    for(int64_t c=0;c<n;c++){ Ap[c]=q;
+        if(c>0){Ai[q]=c-1;Ax[q]=-1.0;q++;}       /* super */
+        Ai[q]=c;Ax[q]=5.0;q++;
+        if(c<n-1){Ai[q]=c+1;Ax[q]=-4.0;q++;}     /* sub != super */
+    }
+    Ap[n]=q;
+    double lam[8],res[8]; speigs_opts o; speigs_default_opts(&o); speigs_info inf;
+    int rc=speigs(n,Ap,Ai,Ax,k,SPEIGS_SM,&o,lam,NULL,res,&inf);
+    printf("    rc=%d (%s)\n",rc,speigs_errmsg(rc));
+    check(rc==SPEIGS_ERR_NOTSYM,"rejected with SPEIGS_ERR_NOTSYM",rc,-6,0);
+    /* the true smallest is ~1.0; the symmetrisation of the upper triangle gives
+     * ~3.0 -- the wrong answer this check exists to prevent */
+    o.check_sym=0;
+    rc=speigs(n,Ap,Ai,Ax,k,SPEIGS_SM,&o,lam,NULL,res,&inf);
+    printf("    with check_sym=0 (opt-out): lambda[0]=%.6f, true=%.6f\n",
+           lam[0], 5.0+4.0*cos(n*M_PI/(n+1)));
+    check(fabs(lam[0]-3.0)<1e-3,"opt-out reproduces the symmetrised answer",lam[0],3.0,1e-3);
+    free(Ap);free(Ai);free(Ax);
+}
+
+/* ---- upper-triangle-only storage must still be ACCEPTED ------------------ */
+static void test_upper_only(int64_t N,int64_t k){
+    printf("\n[13] Upper-triangle-only storage (allowed by the API) still accepted\n");
+    int64_t *Ap,*Ai,n; double *Ax; lap3d(N,1,&Ap,&Ai,&Ax,&n);
+    /* strip to the upper triangle */
+    int64_t *Bp=malloc((n+1)*sizeof(int64_t)),*Bi=malloc(Ap[n]*sizeof(int64_t));
+    double *Bx=malloc(Ap[n]*sizeof(double)); int64_t q=0;
+    for(int64_t c=0;c<n;c++){ Bp[c]=q;
+        for(int64_t p=Ap[c];p<Ap[c+1];p++) if(Ai[p]<=c){Bi[q]=Ai[p];Bx[q]=Ax[p];q++;} }
+    Bp[n]=q;
+    int64_t cnt; double *ex=exact_spectrum(N,1,&cnt);
+    double *lam=calloc(k,sizeof(double)),*res=calloc(k,sizeof(double));
+    speigs_opts o; speigs_default_opts(&o); speigs_info inf;
+    int rc=speigs(n,Bp,Bi,Bx,k,SPEIGS_SM,&o,lam,NULL,res,&inf);
+    printf("    nnz halved %lld -> %lld, rc=%d\n",(long long)Ap[n],(long long)q,rc);
+    check(rc==SPEIGS_OK,"upper-only storage accepted",rc,0,0);
+    for(int64_t i=0;i<k;i++){
+        char b[64]; snprintf(b,sizeof b,"lambda[%lld] vs analytic",(long long)i);
+        check(fabs(lam[i]-ex[i])<=1e-9*fmax(1.0,fabs(ex[i])),b,lam[i],ex[i],1e-9);
+    }
+    free(Ap);free(Ai);free(Ax);free(Bp);free(Bi);free(Bx);free(ex);free(lam);free(res);
+}
+
 int main(int argc,char**argv){
     int64_t N = (argc>1)?atoll(argv[1]):16;
     printf("=========================================================\n");
@@ -405,6 +455,8 @@ int main(int argc,char**argv){
     test_banded(20000,4);
     test_isolated();
     test_hermitian(12,5);
+    test_nonsymmetric();
+    test_upper_only(12,4);
     printf("\n=========================================================\n");
     printf(" %d checks, %d failures\n", checks, fails);
     printf("=========================================================\n");

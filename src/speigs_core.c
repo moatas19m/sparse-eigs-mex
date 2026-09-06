@@ -352,6 +352,54 @@ static int dense_path(speigs_int n, const speigs_int *Ap, const speigs_int *Ai,
     return SPEIGS_OK;
 }
 
+/* ---------------------------------------------------------- symmetry ------ */
+/* Returns 1 if A is symmetric with full storage, 2 if only the upper triangle
+ * is stored, 3 if only the lower, and 0 if A is genuinely non-symmetric.
+ *
+ * This matters more than it looks. The solver hands CHOLMOD stype=1, i.e.
+ * "symmetric, read the upper triangle" -- so without this check a non-symmetric
+ * matrix is silently replaced by the symmetrisation of its upper triangle and
+ * the wrong eigenvalues are returned with a small residual and no warning. */
+static int check_symmetry(speigs_int n, const speigs_int *Ap, const speigs_int *Ai,
+                          const double *Ax)
+{
+    int has_upper=0, has_lower=0;
+    for (speigs_int c=0;c<n && !(has_upper&&has_lower);c++)
+        for (speigs_int q=Ap[c];q<Ap[c+1];q++){
+            if (Ai[q] < c) has_upper=1;
+            else if (Ai[q] > c) has_lower=1;
+        }
+    if (!has_lower && has_upper) return 2;      /* upper-triangle storage */
+    if (!has_upper && has_lower) return 3;      /* lower-triangle storage */
+    if (!has_upper && !has_lower) return 1;     /* diagonal */
+
+    /* both triangles present: require A == A' */
+    speigs_int nnz=Ap[n];
+    speigs_int *Tp=(speigs_int*)calloc(n+1,sizeof(speigs_int));
+    speigs_int *Ti=(speigs_int*)malloc((size_t)(nnz?nnz:1)*sizeof(speigs_int));
+    double     *Tx=(double*)malloc((size_t)(nnz?nnz:1)*sizeof(double));
+    speigs_int *wk=(speigs_int*)calloc(n,sizeof(speigs_int));
+    int ok=1;
+    if (!Tp||!Ti||!Tx||!wk){ free(Tp);free(Ti);free(Tx);free(wk); return 1; } /* skip on OOM */
+    for (speigs_int q=0;q<nnz;q++) wk[Ai[q]]++;
+    for (speigs_int i=0;i<n;i++){ Tp[i+1]=Tp[i]+wk[i]; wk[i]=Tp[i]; }
+    for (speigs_int c=0;c<n;c++)
+        for (speigs_int q=Ap[c];q<Ap[c+1];q++){
+            speigs_int d=wk[Ai[q]]++; Ti[d]=c; Tx[d]=Ax[q];
+        }
+    /* the transpose of a symmetric CSC matrix is itself, entry for entry */
+    for (speigs_int i=0;i<=n && ok;i++) if (Tp[i]!=Ap[i]) ok=0;
+    for (speigs_int q=0;q<nnz && ok;q++){
+        if (Ti[q]!=Ai[q]) ok=0;
+        else {
+            double a=Ax[q], b=Tx[q], m=fabs(a)>fabs(b)?fabs(a):fabs(b);
+            if (fabs(a-b) > 1e-12*(m>0?m:1.0)) ok=0;
+        }
+    }
+    free(Tp); free(Ti); free(Tx); free(wk);
+    return ok ? 1 : 0;
+}
+
 /* -------------------------------------------------------- diagonal -------- */
 static int is_diagonal(speigs_int n, const speigs_int *Ap, const speigs_int *Ai){
     for (speigs_int c=0;c<n;c++)
@@ -587,7 +635,7 @@ done:
 void speigs_default_opts(speigs_opts *o){
     memset(o,0,sizeof *o);
     o->tol=0.0; o->maxit=0; o->ncv=0; o->dense_max=-1; o->detect=1;
-    o->seed=0; o->ordering=0; o->shift0=0.0; o->band_max=0;
+    o->seed=0; o->ordering=0; o->shift0=0.0; o->band_max=0; o->check_sym=1;
 }
 
 
@@ -726,6 +774,8 @@ const char *speigs_errmsg(int c){
       case SPEIGS_ERR_MEM: return "out of memory";
       case SPEIGS_ERR_FACTOR: return "factorization failed";
       case SPEIGS_ERR_LAPACK: return "LAPACK failed";
+      case SPEIGS_ERR_NOTSYM: return "matrix is not symmetric "
+             "(this solver is for symmetric/Hermitian matrices only)";
       default: return "internal error";
     }
 }
@@ -740,6 +790,10 @@ int speigs(speigs_int n, const speigs_int *Ap, const speigs_int *Ai, const doubl
 
     if (n<=0 || !Ap || !Ai || !Ax || !lambda) return SPEIGS_ERR_ARG;
     if (k<=0 || k>n) return SPEIGS_ERR_ARG;
+
+    /* Reject non-symmetric input rather than silently symmetrising it. */
+    if (opts->check_sym == 0 ? 0 : (check_symmetry(n,Ap,Ai,Ax) == 0))
+        return SPEIGS_ERR_NOTSYM;
 
     double t0=wall();
     int dmax = opts->dense_max < 0 ? 800 : opts->dense_max;

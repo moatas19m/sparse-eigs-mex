@@ -44,6 +44,8 @@ typedef struct {
     int         dense_max;  /* use dense path when n <= this; -1 => 800, 0 => off */
     int         detect;     /* 1 => run structure analysis (default), 0 => off    */
     uint64_t    seed;       /* deterministic start vector; 0 => 88172645463325252 */
+    int         check_sym;  /* 1 = verify symmetry (default). Set 0 only if you
+                             * already know A is symmetric: the check is O(nnz)  */
     int         band_max;   /* banded path if RCM bandwidth <= this; 0 => 128,
                              * negative disables it entirely.                 */
     int         ordering;   /* 0 = auto (size-based), 1 = AMD, 2 = METIS */
@@ -102,6 +104,7 @@ const char *speigs_errmsg(int code);
 #define SPEIGS_ERR_FACTOR   (-3)
 #define SPEIGS_ERR_LAPACK   (-4)
 #define SPEIGS_ERR_INTERNAL (-5)
+#define SPEIGS_ERR_NOTSYM   (-6)
 
 #ifdef __cplusplus
 }

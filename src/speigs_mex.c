@@ -85,6 +85,7 @@ void mexFunction(int nlhs, mxArray *plhs[], int nrhs, const mxArray *prhs[])
             o.ordering  = (int)get_scalar_field(prhs[2],"ordering",0);
             o.band_max  = (int)get_scalar_field(prhs[2],"band_max",0);
             o.detect    = (int)get_scalar_field(prhs[2],"detect",1);
+            o.check_sym = (int)get_scalar_field(prhs[2],"check_sym",1);
             const mxArray *wf = mxGetField(prhs[2],0,"which");
             if (wf && mxIsChar(wf)){
                 char buf[16]; mxGetString(wf,buf,sizeof buf);
@@ -174,6 +175,11 @@ void mexFunction(int nlhs, mxArray *plhs[], int nrhs, const mxArray *prhs[])
     if (rc != SPEIGS_OK){
         if (Vm) mxDestroyArray(Vm);
         mxFree(lam); mxFree(res);
+        if (rc == SPEIGS_ERR_NOTSYM)
+            mexErrMsgIdAndTxt("speigs:notSymmetric",
+                "A is not symmetric. speigs solves symmetric and Hermitian "
+                "eigenproblems; for a general matrix use eigs. (If A is "
+                "symmetric to working precision, pass opts.check_sym = 0.)");
         mexErrMsgIdAndTxt("speigs:failed","speigs failed: %s", speigs_errmsg(rc));
     }
 

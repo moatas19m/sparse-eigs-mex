@@ -41,7 +41,7 @@ reorthogonalisation over a pluggable operator, so `'sm'` and `'lm'` share one pa
 
 ## Validation
 
-`make test` — 66 checks, 0 failures, under both clang and gcc. Correctness is
+`make test` — 73 checks, 0 failures, under both clang and gcc. Correctness is
 checked against the **closed-form** Laplacian spectra rather than another numerical
 code: eigenvalues agree to 1e-12, the singular PSD case returns λ₀ = -4.3e-19 with a
 constant null vector, and all three copies of a multiplicity-3 eigenvalue are found
@@ -65,6 +65,24 @@ with mutually orthogonal eigenvectors.
 | Complex Hermitian | done, via a real embedding of twice the size |
 | Triangular detection | **deliberately not implemented** — see below |
 | MEX gateway complex support | written, **never run against MATLAB** |
+| Non-symmetric input | **rejected** with `SPEIGS_ERR_NOTSYM` — see below |
+
+### The one requirement not met: "should work for any matrix"
+
+This solver is for **symmetric and Hermitian** matrices. A general non-symmetric
+matrix is detected and rejected, not solved.
+
+That check is not cosmetic. The solver hands CHOLMOD `stype=1` ("symmetric, read
+the upper triangle"), so without it a non-symmetric matrix is silently replaced by
+the symmetrisation of its upper triangle. On a tridiagonal matrix with sub-diagonal
+-4 and super-diagonal -1 (true smallest eigenvalue 1.000001) it returned **3.000002
+with a small residual and no warning** — a confident wrong answer. It now returns
+`SPEIGS_ERR_NOTSYM` instead.
+
+Supporting general non-symmetric matrices means Arnoldi rather than Lanczos, a
+Hessenberg projected matrix rather than a tridiagonal one, complex conjugate
+eigenvalue pairs, and Krylov–Schur restarting on a real Schur form. That is real
+work and is not done.
 
 **Why there is no triangular detection.** For a symmetric matrix it would be either
 useless or wrong. If both triangles are stored, symmetric *and* triangular implies
