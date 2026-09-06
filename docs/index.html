@@ -112,7 +112,7 @@
     <span>k smallest / largest magnitude eigenpairs</span>
     <span>Sparse SPD, possibly semi-definite</span>
     <span>MATLAB R2017a or older</span>
-    <span>Apple M1 · SuiteSparse 7.14.0 · 39/39 validation checks</span>
+    <span>Apple M1 · SuiteSparse 7.14.0 · 66/66 validation checks</span>
   </div>
 </header>
 
@@ -134,7 +134,7 @@
   </div>
   <div class="v ok">
     <div class="k">Validation</div>
-    <div class="val">39 / 39</div>
+    <div class="val">66 / 66</div>
     <div class="sub">Against analytically known spectra, under both clang and gcc.</div>
   </div>
 </div>
@@ -285,15 +285,16 @@ umfpack_dl_numeric   →  status = <b>UMFPACK_OK</b>,           rcond   = <b>9.0
   </div>
   <div class="scroll">
     <table>
-      <caption>Structure detection pass — all tests O(nnz)</caption>
-      <thead><tr><th>Structure</th><th style="text-align:left">Test</th><th style="text-align:left">Payoff</th></tr></thead>
+      <caption>Structure detection — all implemented, all tests O(nnz)</caption>
+      <thead><tr><th>Structure</th><th style="text-align:left">Test</th><th style="text-align:left">Payoff, and what measurement showed</th></tr></thead>
       <tbody>
-        <tr><td>Diagonal</td><td style="text-align:left">pattern scan</td><td style="text-align:left">Eigenvalues are the diagonal. O(n log n), done.</td></tr>
-        <tr><td>Triangular</td><td style="text-align:left">all i ≥ j, or all i ≤ j</td><td style="text-align:left">Eigenvalues are the diagonal. O(nnz), done.</td></tr>
-        <tr><td>Disconnected</td><td style="text-align:left">connected components, union–find</td><td style="text-align:left">Solve each block independently, merge. Superlinear saving; common in assembled or substructured FEM.</td></tr>
-        <tr><td>Narrow band</td><td style="text-align:left">bandwidth after RCM</td><td style="text-align:left">LAPACK banded Cholesky <code>dpbtrf</code> — far faster and lower memory than any sparse factorization.</td></tr>
-        <tr><td>Zero rows/cols</td><td style="text-align:left">degree scan</td><td style="text-align:left">Exact zero eigenvalues; deflate immediately.</td></tr>
-        <tr><td>Small n, or large k/n</td><td style="text-align:left">n ≲ 1000 or k &gt; n/4</td><td style="text-align:left">Dense LAPACK <code>dsyevr</code>. Beats any Krylov method and is bulletproof — <code>eigs</code> is notoriously poor in this regime.</td></tr>
+        <tr><td>Diagonal</td><td style="text-align:left">pattern scan</td><td style="text-align:left">Eigenvalues are the diagonal. 5×10⁻⁵ s for n = 5,000.</td></tr>
+        <tr><td>Disconnected</td><td style="text-align:left">union–find on the numerical pattern</td><td style="text-align:left">Each block solved independently and merged. <strong>Exact, not approximate</strong> — every eigenvalue lives in exactly one block, so the global k smallest must lie among the per-block k smallest.</td></tr>
+        <tr><td>Isolated nodes,<br>zero rows</td><td style="text-align:left">falls out of the above</td><td style="text-align:left">Stored zeros do not connect, so a structurally-present-but-zero row is correctly isolated and yields an exact zero eigenvalue.</td></tr>
+        <tr><td>Narrow band</td><td style="text-align:left">RCM, then band <em>occupancy</em></td><td style="text-align:left">LAPACK <code>dpbtrf</code>. Beats CHOLMOD 1.15×→3.87× on a <em>dense</em> band, but is a coin flip (0.90–1.19×) on a sparse wide band — so the gate is occupancy ≥ 5%, not bandwidth.</td></tr>
+        <tr><td>Small n, or large k/n</td><td style="text-align:left">n ≤ 800 or k &gt; n/4</td><td style="text-align:left">Dense LAPACK <code>dsyev</code>. Beats any Krylov method where Krylov methods are worst.</td></tr>
+        <tr><td>Complex Hermitian</td><td style="text-align:left">value type</td><td style="text-align:left">Real embedding [[R,−S],[S,R]] of twice the size. ~2× a native complex factorization, in exchange for reusing the entire tested real pipeline.</td></tr>
+        <tr><td><em>Triangular</em></td><td style="text-align:left"><em>deliberately absent</em></td><td style="text-align:left">For symmetric input it is useless or wrong: full storage makes triangular ⇒ diagonal, and upper-only storage makes <em>every</em> symmetric matrix look triangular. Omitted on purpose.</td></tr>
       </tbody>
     </table>
   </div>
@@ -331,13 +332,17 @@ umfpack_dl_numeric   →  status = <b>UMFPACK_OK</b>,           rcond   = <b>9.0
 
 <section class="col">
   <div class="eyebrow">Two bugs the measurements caught</div>
-  <h2>Where writing the code changed the design</h2>
+  <h2>Three places writing the code changed the design</h2>
   <div class="note risk">
     <h3>1 · A "safely tiny" shift cost 75× in solves</h3>
     <p>For a singular matrix I first set the regularising shift to δ = 10⁻¹⁰‖A‖, on the reasoning that smaller is safer. It is not. That makes θ₀/θ₁ ≈ 3×10⁷, which pollutes the small Ritz values enough that convergence never certifies: <strong>3,020 solves and a partial-convergence flag</strong>, versus <strong>40 solves</strong> at δ = 10⁻⁶‖A‖ for identical accuracy. The good region turned out to be broad — 10⁻⁶ to 10⁻³ at both n = 4,096 and n = 13,824 — so the default is now its conservative end. My test had not asserted the convergence flag, so the bad default passed silently; it does now.</p>
   </div>
   <div class="note risk">
-    <h3>2 · Raising that default made the solver answer the wrong question</h3>
+    <h3>2 · A pairwise independence test is not an independence test</h3>
+    <p>Recovering complex eigenvectors from the real embedding, I first discarded duplicates by checking whether a candidate was parallel to one already accepted. That is not sufficient: for an eigenvalue of multiplicity m the embedding produces a 2m-real-dimensional space, and vectors drawn from it can be pairwise non-parallel yet still <strong>C-linearly dependent</strong>. The solver returned one eigenvalue four times where it has multiplicity three. The fix is complex Gram–Schmidt — project out the accepted directions and accept only what has norm left over.</p>
+  </div>
+  <div class="note risk">
+    <h3>3 · Raising that default made the solver answer the wrong question</h3>
     <p>With a larger starting δ, the escalation loop for a genuinely indefinite matrix could reach δ ≈ 18 and <em>succeed</em> at Cholesky — but shift-invert at δ = 18 converges to the eigenvalues nearest −18, not those nearest zero. It returned a confident, wrong answer. The fix is a hard cap: for a positive semi-definite matrix the very first shift always works, so needing a large one is proof the matrix is indefinite and must go to LU instead. The escalation now stops at 10⁻³‖A‖.</p>
   </div>
 </section>
@@ -357,9 +362,9 @@ umfpack_dl_numeric   →  status = <b>UMFPACK_OK</b>,           rcond   = <b>9.0
     <h3>3 · One matrix family</h3>
     <p>All measurements are on 3-D Laplacians. They are a fair, well-understood proxy with realistic fill, and their known spectra are what make the validation rigorous — but they are one family. Irregular FEM meshes, circuit matrices and graph Laplacians will each behave differently, and some will favour this approach more than the Laplacian does.</p>
   </div>
-  <div class="note">
-    <h3>4 · Not yet implemented</h3>
-    <p>Connected-component splitting and the banded path are designed and documented but not written; the structure pass currently detects the diagonal case and dispatches to dense LAPACK for small n. Complex Hermitian input is rejected with a clear error rather than silently mishandled.</p>
+  <div class="note risk">
+    <h3>4 · The MEX layer has never been executed</h3>
+    <p>The gateway compiles clean against both MATLAB API eras, including the complex paths, but compiling is not running. Everything else here is backed by execution; that layer is backed only by inspection, and should be treated as unverified until someone builds it against a real MATLAB.</p>
   </div>
 </section>
 
